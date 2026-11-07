@@ -398,12 +398,20 @@ QuickNode have free tiers). The public endpoint rate-limits under load.
 | --- | --- | --- | --- |
 | `OPENAI_API_KEY` | Server | — | Interpret messages with OpenAI |
 | `ANTHROPIC_API_KEY` | Server | — | Interpret with Anthropic (ignored if the OpenAI key is set) |
+| `OPENAI_BASE_URL` | Server | OpenAI | Any OpenAI-compatible endpoint, e.g. `https://openrouter.ai/api/v1` |
 | `OPENAI_MODEL` | Server | `gpt-4o-mini` | Model override |
 | `ANTHROPIC_MODEL` | Server | `claude-haiku-5-5` | Model override |
 | `NEXT_PUBLIC_SOLANA_RPC_URL` | Public | `https://api.devnet.solana.com` | Devnet RPC endpoint |
 
 With no AI key set, the app uses the deterministic fallback parser and labels the engine
 accordingly in the interface.
+
+**Any OpenAI-compatible provider works.** Point `OPENAI_BASE_URL` at it and put its key in
+`OPENAI_API_KEY` — OpenRouter (`https://openrouter.ai/api/v1`) has free models and needs no card.
+The interface names the provider it actually reached, so the badge reads `openrouter` rather than
+`openai`. Strict `json_schema` output is an OpenAI feature; other providers are sent plain JSON
+mode with the shape described in the prompt, and the reply is validated by Zod either way — a
+model that returns the wrong shape is rejected and the built-in parser answers instead.
 
 ### Secret handling
 

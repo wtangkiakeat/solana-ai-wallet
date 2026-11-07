@@ -33,9 +33,34 @@ const REQUEST_TIMEOUT_MS = 15_000;
 /* -------------------------------------------------------------------------- */
 
 type Engine =
-  | { kind: 'openai'; apiKey: string; model: string }
+  | {
+      kind: 'openai' | 'openrouter' | 'openai-compatible';
+      apiKey: string;
+      model: string;
+      /** Chat-completions endpoint, so any OpenAI-protocol host can be used. */
+      endpoint: string;
+      /** Strict json_schema output, which only some providers implement. */
+      supportsJsonSchema: boolean;
+    }
   | { kind: 'anthropic'; apiKey: string; model: string }
   | { kind: 'local-parser' };
+
+const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
+
+/**
+ * Work out which provider a base URL points at, so the interface can name the
+ * engine that actually answered rather than calling everything "openai".
+ */
+function providerFor(baseUrl: string): 'openai' | 'openrouter' | 'openai-compatible' {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    if (host.endsWith('openai.com')) return 'openai';
+    if (host.endsWith('openrouter.ai')) return 'openrouter';
+    return 'openai-compatible';
+  } catch {
+    return 'openai-compatible';
+  }
+}
 
 /**
  * Pick an engine from the server environment.
@@ -47,10 +72,27 @@ type Engine =
 function selectEngine(): Engine {
   const openaiKey = process.env.OPENAI_API_KEY?.trim();
   if (openaiKey) {
+    const baseUrl = (process.env.OPENAI_BASE_URL?.trim() || OPENAI_DEFAULT_BASE_URL).replace(
+      /\/+$/,
+      '',
+    );
+    const kind = providerFor(baseUrl);
+
     return {
-      kind: 'openai',
+      kind,
       apiKey: openaiKey,
-      model: process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini',
+      // Default to a small OpenAI model, or a free OpenRouter one, depending
+      // on where the requests are actually going.
+      model:
+        process.env.OPENAI_MODEL?.trim() ||
+        (kind === 'openai' ? 'gpt-4o-mini' : 'meta-llama/llama-3.3-70b-instruct:free'),
+      endpoint: `${baseUrl}/chat/completions`,
+      // Strict json_schema is an OpenAI feature. Other providers, and most
+      // open-weight models behind them, do not implement it — asking for it
+      // there fails the whole request, so those get plain JSON mode and the
+      // schema spelled out in the prompt instead. Zod checks the result
+      // either way, which is the point of validating rather than trusting.
+      supportsJsonSchema: kind === 'openai',
     };
   }
 
@@ -175,35 +217,67 @@ const INTENT_JSON_SCHEMA = {
 
 export class AiUnavailableError extends Error {}
 
+type OpenAiLikeEngine = Extract<
+  Engine,
+  { kind: 'openai' | 'openrouter' | 'openai-compatible' }
+>;
+
 async function callOpenAi(
-  engine: Extract<Engine, { kind: 'openai' }>,
+  engine: OpenAiLikeEngine,
   message: string,
   contextBlock: string,
 ): Promise<unknown> {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${engine.apiKey}`,
+  };
+
+  // OpenRouter uses these to attribute traffic. Neither is required, and
+  // neither says anything about the user or the wallet.
+  if (engine.kind === 'openrouter') {
+    headers['HTTP-Referer'] = 'https://github.com/wtangkiakeat/solana-ai-wallet';
+    headers['X-Title'] = 'Solana AI Wallet';
+  }
+
+  // Strict json_schema is an OpenAI feature. Other providers, and most
+  // open-weight models behind them, do not implement it, and asking for it
+  // there fails the whole request. Those get plain JSON mode with the shape
+  // spelled out in the prompt. Zod validates the reply either way, so a model
+  // that ignores both simply fails validation and the local parser answers.
+  const schemaInstruction = engine.supportsJsonSchema
+    ? ''
+    : `\n\nReply with a single JSON object and nothing else, with no prose and no code fences. It must have exactly these keys: ${Object.keys(
+        INTENT_JSON_SCHEMA.properties,
+      ).join(', ')}. Use null for any that do not apply.`;
+
+  const response = await fetch(engine.endpoint, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${engine.apiKey}`,
-    },
+    headers,
     body: JSON.stringify({
       model: engine.model,
       temperature: 0,
       messages: [
-        { role: 'system', content: `${SYSTEM_PROMPT}\n\n${contextBlock}` },
+        {
+          role: 'system',
+          content: `${SYSTEM_PROMPT}${schemaInstruction}\n\n${contextBlock}`,
+        },
         { role: 'user', content: message },
       ],
-      response_format: {
-        type: 'json_schema',
-        json_schema: { name: 'wallet_intent', strict: true, schema: INTENT_JSON_SCHEMA },
-      },
+      response_format: engine.supportsJsonSchema
+        ? {
+            type: 'json_schema',
+            json_schema: { name: 'wallet_intent', strict: true, schema: INTENT_JSON_SCHEMA },
+          }
+        : { type: 'json_object' },
     }),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
-    throw new AiUnavailableError(`OpenAI returned ${response.status}. ${detail.slice(0, 200)}`);
+    throw new AiUnavailableError(
+      `${engine.kind} returned ${response.status}. ${detail.slice(0, 200)}`,
+    );
   }
 
   const payload = (await response.json()) as {
@@ -212,10 +286,17 @@ async function callOpenAi(
   const content = payload.choices?.[0]?.message?.content;
 
   if (!content) {
-    throw new AiUnavailableError('OpenAI returned an empty response.');
+    throw new AiUnavailableError(`${engine.kind} returned an empty response.`);
   }
 
-  return JSON.parse(content);
+  // Some open-weight models wrap their JSON in a code fence despite being
+  // asked not to. Stripping it is cheap, and the result is still validated.
+  const cleaned = content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '');
+
+  return JSON.parse(cleaned);
 }
 
 async function callAnthropic(
@@ -292,6 +373,30 @@ const AMOUNT_AFTER_VERB = /\b(?:send|transfer|pay|move)\s+(\d+(?:\.\d+)?|\.\d+)/
 export function parseLocally(message: string, context: InterpretRequest['context']): AiIntent {
   const text = message.trim();
   const lower = text.toLowerCase();
+
+  // A greeting or a "what can you do" is a real question, and answering it
+  // with "not understood" makes a working app look broken. It is also the
+  // first thing most people type.
+  if (/^(hi|hey|hello|yo|sup|hiya|good (morning|afternoon|evening))\b/.test(lower) ||
+      /\b(help|what can you do|what do you do|how does this work|commands|options)\b/.test(lower)) {
+    return {
+      status: 'ready',
+      action: 'unsupported',
+      amountSol: null,
+      recipient: null,
+      signature: null,
+      subjectAddress: null,
+      explanation:
+        'I can do five things on Solana Devnet:\n\n' +
+        '• Send SOL — "Send 0.01 SOL to <address>"\n' +
+        '• Check your balance — "What is my balance?"\n' +
+        '• Tell you the most you can safely send\n' +
+        '• Explain a transaction — paste any signature\n' +
+        '• Look up an address — "Check <address>"\n\n' +
+        'You can also use the Send form on the right, which skips me entirely. Either way you see every detail and sign it yourself.',
+      clarificationQuestion: null,
+    };
+  }
 
   // Price questions have no answer in this app, with or without a model.
   // Plurals are matched explicitly: \bdollar\b does not match "dollars".
@@ -439,7 +544,10 @@ export function parseLocally(message: string, context: InterpretRequest['context
     amountSol: null,
     recipient: null,
     explanation:
-      'This request was not understood. Try "What is my balance?" or "Send 0.01 SOL to <address>".',
+      'I did not understand that one.\n\n' +
+      'Things I do understand: "What is my balance?", "Send 0.01 SOL to <address>", ' +
+      '"Show my recent transactions", or paste a transaction signature and I will explain it.\n\n' +
+      'If it is simpler, use the Send form on the right — it does not go through me at all.',
     clarificationQuestion: null,
   };
 }
@@ -594,9 +702,9 @@ export async function interpretMessage(request: InterpretRequest): Promise<Inter
 
   try {
     const raw =
-      engine.kind === 'openai'
-        ? await callOpenAi(engine, request.message, contextBlock)
-        : await callAnthropic(engine, request.message, contextBlock);
+      engine.kind === 'anthropic'
+        ? await callAnthropic(engine, request.message, contextBlock)
+        : await callOpenAi(engine, request.message, contextBlock);
 
     // Nothing from a model is trusted until it matches the schema exactly.
     const parsed = AiIntentSchema.safeParse(raw);

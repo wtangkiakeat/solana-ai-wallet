@@ -54,7 +54,9 @@ export type PendingTransfer = {
   /** `rpc` when the network priced the real message, `fallback` when it could not. */
   feeSource: 'rpc' | 'fallback';
   totalLamports: bigint;
-  /** The AI's explanation, shown clearly labelled as such. */
+  /** Where this transfer came from: the assistant, or the direct form. */
+  source: 'chat' | 'form';
+  /** The explanation shown above the buttons. Labelled as AI only when it is. */
   explanation: string;
   warnings: string[];
   /** What the chain says would happen if this were submitted. */

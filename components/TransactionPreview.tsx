@@ -119,9 +119,18 @@ export function TransactionPreview({
 
         <InstructionPanel instructions={transfer.instructions} />
 
+        {/* Only an assistant-originated transfer carries the AI tag. A transfer
+            typed into the form is the user's own wording, and labelling it as
+            an AI reading would be a small lie. */}
         <div className="rounded-xl border border-ink-700/70 bg-ink-900/50 p-3">
           <div className="pb-1.5">
-            <AiTag engine={engine} />
+            {transfer.source === 'form' ? (
+              <span className="chip border-ink-600 bg-ink-800/80 text-haze-400">
+                Entered by you
+              </span>
+            ) : (
+              <AiTag engine={engine} />
+            )}
           </div>
           <p className="text-xs leading-relaxed text-haze-300">{transfer.explanation}</p>
         </div>

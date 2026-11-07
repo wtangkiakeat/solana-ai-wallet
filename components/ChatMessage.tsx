@@ -42,16 +42,21 @@ export function ChatMessage({ message }: { message: ChatMessageModel }) {
 
       <div className="min-w-0 max-w-[85%] space-y-2.5">
         <div className={`rounded-2xl rounded-tl-md border px-4 py-3 ${toneStyles}`}>
-          <div className="flex flex-wrap items-center gap-1.5 pb-2">
-            {message.tone === 'error' ? (
-              <span className="chip border-rose-accent/50 bg-rose-accent/15 text-rose-accent">
-                <IconAlert className="h-3 w-3" />
-                Blocked
-              </span>
-            ) : (
-              <AiTag engine={message.engine} />
-            )}
-          </div>
+          {/* A tag only where something produced the text. The greeting and
+              the app's own confirmations are not AI output, and labelling
+              them as such would misattribute the app's own words. */}
+          {(message.tone === 'error' || message.engine) && (
+            <div className="flex flex-wrap items-center gap-1.5 pb-2">
+              {message.tone === 'error' ? (
+                <span className="chip border-rose-accent/50 bg-rose-accent/15 text-rose-accent">
+                  <IconAlert className="h-3 w-3" />
+                  Blocked
+                </span>
+              ) : (
+                <AiTag engine={message.engine} />
+              )}
+            </div>
+          )}
 
           <p className="text-sm leading-relaxed whitespace-pre-line text-haze-200">{message.text}</p>
         </div>

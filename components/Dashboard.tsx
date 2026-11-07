@@ -54,6 +54,7 @@ import type {
 import { ChatInterface } from './ChatInterface';
 import { IconShield } from './icons';
 import { NetworkBadge } from './NetworkBadge';
+import { SendForm } from './SendForm';
 import { Sidebar, type NavView } from './Sidebar';
 import { TransactionHistory } from './TransactionHistory';
 import { TransactionPreview } from './TransactionPreview';
@@ -115,6 +116,7 @@ export function Dashboard() {
   const [history, setHistory] = useState<TransactionRecord[]>([]);
   /** Activity read back from the chain, distinct from this session's sends. */
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
+  const [isPreparingForm, setIsPreparingForm] = useState(false);
 
   /** Guards against a second submission while one is already in flight. */
   const submittingRef = useRef(false);
@@ -331,6 +333,7 @@ export function Dashboard() {
         feeSource,
         totalLamports: finalCheck.lamports + realFee,
         explanation: intent.explanation,
+        source: intent.engine === 'form' ? 'form' : 'chat',
         warnings,
         simulation,
         instructions,
@@ -339,10 +342,43 @@ export function Dashboard() {
 
       say(
         'I have prepared the transfer, checked it against your balance, and simulated it on Devnet. Review the details and approve it when you are ready.',
-        { engine: intent.engine },
+        // No engine for a form submission: the app is reporting its own work.
+        intent.engine === 'form' ? {} : { engine: intent.engine },
       );
     },
     [client, isDevnetVerified, planTransaction, say, walletAddress],
+  );
+
+  /**
+   * The form's entry point.
+   *
+   * It builds the same object the AI produces and hands it to the same
+   * function, so there is exactly one path to a signature. Nothing here can
+   * skip a check the chat path runs.
+   */
+  const prepareFromForm = useCallback(
+    async (recipient: string, amountSol: string) => {
+      setIsPreparingForm(true);
+      try {
+        await prepareTransfer({
+          status: 'ready',
+          action: 'transfer_sol',
+          amountSol,
+          recipient,
+          signature: null,
+          subjectAddress: null,
+          explanation: `You are sending ${amountSol} SOL to ${recipient} on Solana Devnet.`,
+          clarificationQuestion: null,
+          warnings: [],
+          requiresConfirmation: true,
+          // Marks the origin so the preview does not label this an AI reading.
+          engine: 'form',
+        });
+      } finally {
+        setIsPreparingForm(false);
+      }
+    },
+    [prepareTransfer],
   );
 
   /* ---------------------------------------------------------------------- */
@@ -668,6 +704,20 @@ ${intent.clarificationQuestion}`
   const spendable =
     balanceLamports !== null ? maxSendableLamports(balanceLamports, feeLamports) : null;
 
+  /**
+   * The badge names the engine that actually answered, not the one configured.
+   * A key can be present and still fail — an expired key, no credit, a provider
+   * outage — and in that case every reply comes from the local parser. Showing
+   * "openai" then would be the app lying about its own provenance.
+   */
+  const answeringEngine =
+    [...messages]
+      .reverse()
+      .find(
+        (message) =>
+          message.role === 'assistant' && message.engine && message.engine !== 'form',
+      )?.engine ?? engine;
+
   const chat = (
     <ChatInterface
       messages={messages}
@@ -675,7 +725,7 @@ ${intent.clarificationQuestion}`
       isBusy={isInterpreting}
       blockedReason={blockedReason}
       hint={hint}
-      engine={engine}
+      engine={answeringEngine}
     />
   );
 
@@ -688,6 +738,16 @@ ${intent.clarificationQuestion}`
       isLoading={isBalanceLoading}
       error={balanceError}
       onRefresh={() => void refreshBalance()}
+    />
+  );
+
+  const sendForm = (
+    <SendForm
+      onSubmit={(recipient, amountSol) => void prepareFromForm(recipient, amountSol)}
+      disabled={!walletAddress || !isDevnetVerified}
+      isBusy={isPreparingForm}
+      balanceLamports={balanceLamports}
+      feeLamports={feeLamports}
     />
   );
 
@@ -750,6 +810,7 @@ ${intent.clarificationQuestion}`
 
               <div className="flex flex-col gap-5">
                 {balanceCard}
+                {sendForm}
                 {transactionPanels}
                 <TransactionHistory records={history} activity={activity} compact />
               </div>

@@ -89,7 +89,15 @@ export type AiIntent = z.infer<typeof AiIntentSchema>;
 /* Response out of /api/interpret                                             */
 /* -------------------------------------------------------------------------- */
 
-export const INTERPRET_ENGINES = ['openai', 'anthropic', 'local-parser'] as const;
+export const INTERPRET_ENGINES = [
+  'openai',
+  'openrouter',
+  // Any other endpoint speaking the OpenAI chat-completions protocol.
+  'openai-compatible',
+  'anthropic',
+  'local-parser',
+  'form',
+] as const;
 export type InterpretEngine = (typeof INTERPRET_ENGINES)[number];
 
 export const InterpretResponseSchema = z.object({

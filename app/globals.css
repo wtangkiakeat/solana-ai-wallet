@@ -1,0 +1,223 @@
+@import 'tailwindcss';
+
+/* ---------------------------------------------------------------------------
+   Design tokens. One dark navy theme, so there is a single colour story to
+   check rather than two. Accents are blue and violet, with a mint green kept
+   exclusively for chain-verified success and amber for warnings.
+   --------------------------------------------------------------------------- */
+
+@theme {
+  --color-ink-950: #04071a;
+  --color-ink-900: #070b22;
+  --color-ink-850: #0a1030;
+  --color-ink-800: #0e1539;
+  --color-ink-700: #151d4a;
+  --color-ink-600: #1e2a63;
+  --color-ink-500: #2b3a7f;
+
+  --color-haze-100: #eef2ff;
+  --color-haze-300: #b9c3e8;
+  --color-haze-400: #8f9bc7;
+  --color-haze-500: #6b77a3;
+
+  --color-brand-400: #6f9bff;
+  --color-brand-500: #4c7dff;
+  --color-brand-600: #3561ec;
+
+  --color-violet-accent: #9b6bff;
+  --color-mint-400: #2ee6a8;
+  --color-mint-500: #14c88d;
+  --color-amber-accent: #f5b33c;
+  --color-rose-accent: #ff6b81;
+
+  --font-sans:
+    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+/* ---------------------------------------------------------------------------
+   Base
+   --------------------------------------------------------------------------- */
+
+html,
+body {
+  background-color: var(--color-ink-950);
+  color: var(--color-haze-100);
+}
+
+body {
+  font-family: var(--font-sans);
+  min-height: 100dvh;
+  /* Two very soft radial washes, so the background has depth without noise. */
+  background-image:
+    radial-gradient(900px 520px at 12% -8%, rgba(76, 125, 255, 0.16), transparent 70%),
+    radial-gradient(760px 480px at 88% 6%, rgba(155, 107, 255, 0.13), transparent 72%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-ink-600) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--color-ink-600);
+  border-radius: 999px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand-400);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Reusable pieces. Written as component classes because each is used in
+   several places, and repeating a dozen utilities per panel makes the markup
+   hard to read.
+   --------------------------------------------------------------------------- */
+
+@layer components {
+  .panel {
+    @apply rounded-2xl border border-ink-700/70 bg-ink-850/70 backdrop-blur-sm;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 18px 40px -24px rgba(0, 0, 0, 0.8);
+  }
+
+  .panel-heading {
+    @apply text-xs font-semibold uppercase tracking-[0.14em] text-haze-400;
+  }
+
+  /* The shared button shape. Written as one plain-CSS rule covering every
+     variant, because Tailwind v4's @apply takes real utilities only — a
+     variant cannot @apply another component class such as `.btn`. */
+  .btn,
+  .btn-primary,
+  .btn-confirm,
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 0.75rem;
+    padding: 0.625rem 1rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 600;
+    transition-property: color, background-color, border-color, box-shadow, filter;
+    transition-duration: 150ms;
+  }
+
+  .btn:disabled,
+  .btn-primary:disabled,
+  .btn-confirm:disabled,
+  .btn-ghost:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .btn-primary {
+    color: #fff;
+    background-image: linear-gradient(135deg, var(--color-brand-500), var(--color-violet-accent));
+    box-shadow: 0 10px 26px -12px rgba(76, 125, 255, 0.85);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+
+  .btn-confirm {
+    color: var(--color-ink-950);
+    background-image: linear-gradient(135deg, var(--color-mint-400), var(--color-mint-500));
+    box-shadow: 0 10px 26px -12px rgba(46, 230, 168, 0.8);
+  }
+
+  .btn-confirm:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+
+  .btn-ghost {
+    border: 1px solid var(--color-ink-600);
+    background-color: color-mix(in oklab, var(--color-ink-800) 60%, transparent);
+    color: var(--color-haze-300);
+  }
+
+  .btn-ghost:hover:not(:disabled) {
+    @apply border-ink-500 bg-ink-700/60 text-haze-100;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-ink-600 bg-ink-900/80 px-4 py-3 text-sm text-haze-100
+      placeholder:text-haze-500 focus:border-brand-500 focus:outline-none;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold
+      uppercase tracking-wider;
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
+  }
+
+  /* Rows inside the transaction preview: label left, value right. */
+  .detail-row {
+    @apply flex items-start justify-between gap-4 border-b border-ink-700/50 py-3 last:border-b-0;
+  }
+
+  .detail-label {
+    @apply shrink-0 text-xs font-medium uppercase tracking-wider text-haze-400;
+  }
+
+  .detail-value {
+    @apply min-w-0 text-right text-sm text-haze-100;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Motion. Kept small, and switched off for anyone who asked for less of it.
+   --------------------------------------------------------------------------- */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.animate-rise {
+  animation: rise 0.22s ease-out both;
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

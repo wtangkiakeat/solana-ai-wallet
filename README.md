@@ -79,6 +79,17 @@ Amounts are decimal *strings*, never floating-point numbers.
 **Independent transaction validation** — Nine checks run before a confirm button appears, none of
 which consult the AI.
 
+**Pre-signature simulation** — The transaction is run against the network *unsigned* before you
+are asked to approve it, and the preview shows the balance changes the chain itself reported. A
+recognised failure blocks the transfer outright.
+
+**Full instruction disclosure** — The preview lists every instruction in the transaction
+(`System Program — Transfer 10000000 lamports`), so "what am I actually signing?" is answered
+literally rather than summarised.
+
+**First-use warning** — An address with no balance and no transaction history is flagged before
+you send to it, since a mistyped address is the most expensive mistake available here.
+
 **Explicit approval** — A preview showing recipient, amount in SOL and lamports, the
 network-priced fee, the network, and the total. Nothing reaches the wallet until it is approved.
 
@@ -287,6 +298,34 @@ time) and `getFeeForMessage` returns `null` without one, so the estimator attach
 blockhash purely for pricing. If pricing fails, it falls back to the 5,000-lamport base fee and
 the preview says so rather than presenting an estimate as a quote.
 
+### Simulation before signing
+
+Before the preview renders, the transaction is run against the network with `simulateTransaction`
+using `sigVerify: false` — the user has approved nothing yet, so there is no signature to verify.
+The response gives the post-execution lamport balances of both accounts, which become the
+"what will actually change" figures in the preview. This is the strongest check in the app,
+because it is the chain's own answer rather than ours.
+
+A failure the app recognises (insufficient funds, rent-exemption, a missing account) blocks the
+transfer entirely. A failure it does *not* recognise is reported as **inconclusive** and warned
+about rather than blocked — refusing a valid transfer because of an unfamiliar simulation quirk
+would be the worse failure. The next section describes exactly such a quirk.
+
+### A caveat on simulation fidelity
+
+The transaction planner produces **version 1** messages, and the Devnet RPC cannot simulate them:
+it answers `MaxLoadedAccountsDataSizeExceeded` for every one, including transactions that then
+succeed on chain. This was confirmed by simulating the identical message at both versions — v1
+always fails, v0 returns `err: null` with correct balances.
+
+So the app simulates a **version 0 copy** of the message. For a SOL transfer this is a faithful
+stand-in: the instructions, fee payer, accounts and amount are identical, and the two versions
+differ only in address-lookup-table support, which this transaction does not use. The transaction
+actually signed and sent is still the planner's v1 message.
+
+This is recorded rather than hidden: the simulation is of an equivalent transaction, not of the
+exact bytes being signed.
+
 ### Signing and submission
 
 The transfer instruction is rebuilt at approval time from the validated values that were
@@ -366,6 +405,9 @@ accordingly in the interface.
 - The compiled client bundle has been checked and contains no key material. The only inlined
   public variable is `NEXT_PUBLIC_SOLANA_RPC_URL`.
 - The app never asks for, stores, or has any code path that accepts a seed phrase or private key.
+- Security headers are set in `next.config.ts`: a Content-Security-Policy restricting scripts,
+  styles, fonts and RPC origins; `X-Frame-Options: DENY` against a clickjacked approve button;
+  plus nosniff, a referrer policy, HSTS and a permissions policy.
 
 ---
 
@@ -426,6 +468,11 @@ via `getFeeForMessage`; **and a complete end-to-end transfer with Phantom, final
 preview; the declined-signature path; insufficient-balance refusal with exact figures; invalid
 address, price question and token-request refusals; responsive layout at 375px; no console errors.
 
+**Pre-signature simulation** — verified against live Devnet: the unsigned transaction returns
+`err: null`, 150 compute units, and balance deltas of exactly `-10,005,000` for the sender and
+`+10,000,000` for the recipient, matching the preview. Instruction disclosure and the
+first-use recipient warning were both confirmed rendering in the browser.
+
 **By unit test** — 47 assertions over the validation and amount modules: the model's JSON is
 rejected unless it matches exactly (extra keys, numeric `amountSol`, unknown actions, missing
 explanation); exact lamport arithmetic including `0.1 + 0.2 === 0.3`; rejection of scientific
@@ -455,6 +502,11 @@ to its signing feature. The count was `0` through interpretation and preview, an
   mock wallet; there is no Playwright or Cypress suite in the repository.
 - **The public Devnet RPC rate-limits** under repeated use. Configure a dedicated endpoint for a
   live demo.
+- **Simulation runs against a version 0 copy** of the planned version 1 message, for the RPC
+  reason described above. Equivalent for a SOL transfer, but not byte-identical.
+- **The Content-Security-Policy still allows `'unsafe-inline'` and `'unsafe-eval'` in
+  `script-src`**, because Next.js inlines its hydration bootstrap. Removing them needs
+  per-request nonces, which is worthwhile hardening beyond this MVP.
 
 ### Nothing in this application is simulated
 

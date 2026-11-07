@@ -2,9 +2,9 @@
 
 import { formatSol } from '@/lib/amounts';
 import { CLUSTER, explorerAddressUrl } from '@/lib/constants';
-import type { PendingTransfer } from '@/types/transaction';
+import type { InstructionSummary, PendingTransfer } from '@/types/transaction';
 import { IconAlert, IconExternal, IconShield } from './icons';
-import { AiTag } from './NetworkBadge';
+import { AiTag, VerifiedTag } from './NetworkBadge';
 
 type TransactionPreviewProps = {
   transfer: PendingTransfer;
@@ -113,6 +113,12 @@ export function TransactionPreview({
       </div>
 
       <div className="space-y-2.5 px-5 pb-4 pt-3">
+        {/* What the chain itself says would happen. Kept visually separate from
+            the AI's prose below, and from the app's own intent above. */}
+        <SimulationPanel transfer={transfer} />
+
+        <InstructionPanel instructions={transfer.instructions} />
+
         <div className="rounded-xl border border-ink-700/70 bg-ink-900/50 p-3">
           <div className="pb-1.5">
             <AiTag engine={engine} />
@@ -145,5 +151,141 @@ export function TransactionPreview({
         </button>
       </footer>
     </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Simulation                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** Render a signed lamport delta as "+0.01 SOL" or "-0.010005 SOL". */
+function signedSol(delta: bigint): string {
+  const sign = delta < 0n ? '\u2212' : '+';
+  return `${sign}${formatSol(delta < 0n ? -delta : delta)} SOL`;
+}
+
+/**
+ * What the network said when the transaction was run against it, unsigned.
+ *
+ * This is the only block in the preview reporting the chain's own verdict
+ * rather than the app's intent, so it carries the "verified" treatment. A
+ * simulation that could not run says exactly that, and is never presented as
+ * a pass.
+ */
+function SimulationPanel({ transfer }: { transfer: PendingTransfer }) {
+  const { simulation } = transfer;
+
+  if (simulation.kind === 'unavailable' || simulation.kind === 'inconclusive') {
+    const inconclusive = simulation.kind === 'inconclusive';
+
+    return (
+      <div className="rounded-xl border border-amber-accent/35 bg-amber-accent/8 p-3">
+        <div className="flex items-start gap-2">
+          <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-accent" />
+          <div>
+            <p className="text-xs font-semibold text-amber-accent">
+              {inconclusive ? 'Simulation inconclusive' : 'Not simulated'}
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-amber-accent/90">
+              {simulation.reason}{' '}
+              {inconclusive
+                ? 'Every other check passed, so this is yours to decide — but treat it as unproven.'
+                : 'The checks above still passed, but the network has not confirmed what this transaction would do.'}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // A failed simulation never reaches the preview; it is blocked earlier.
+  if (simulation.kind !== 'succeeded') return null;
+
+  return (
+    <div className="rounded-xl border border-mint-500/30 bg-mint-500/[0.07] p-3">
+      <div className="flex flex-wrap items-center gap-2 pb-2">
+        <VerifiedTag label="Simulated on Devnet" />
+        <span className="text-[11px] text-haze-400">before signing</span>
+      </div>
+
+      <p className="text-[11px] leading-relaxed text-haze-400">
+        The network ran this transaction without signing it. These are the balance changes it
+        reported:
+      </p>
+
+      <dl className="mt-2.5 space-y-1.5">
+        {simulation.senderDelta !== null && (
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-[11px] font-medium uppercase tracking-wider text-haze-400">
+              Your wallet
+            </dt>
+            <dd className="mono text-sm font-semibold text-rose-accent">
+              {signedSol(simulation.senderDelta)}
+            </dd>
+          </div>
+        )}
+        {simulation.recipientDelta !== null && (
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-[11px] font-medium uppercase tracking-wider text-haze-400">
+              Recipient
+            </dt>
+            <dd className="mono text-sm font-semibold text-mint-400">
+              {signedSol(simulation.recipientDelta)}
+            </dd>
+          </div>
+        )}
+        {simulation.computeUnits !== null && (
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-[11px] font-medium uppercase tracking-wider text-haze-400">
+              Compute units
+            </dt>
+            <dd className="mono text-sm text-haze-200">{simulation.computeUnits.toString()}</dd>
+          </div>
+        )}
+      </dl>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Instruction disclosure                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Everything the transaction actually contains.
+ *
+ * A SOL transfer should be exactly one System Program instruction. Showing the
+ * list lets the user verify that themselves rather than trusting the app's
+ * summary: "what am I actually signing?", answered literally.
+ */
+function InstructionPanel({ instructions }: { instructions: InstructionSummary[] }) {
+  if (instructions.length === 0) return null;
+
+  return (
+    <div className="rounded-xl border border-ink-700/70 bg-ink-900/50 p-3">
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-haze-500">
+        What you are signing &mdash; {instructions.length}{' '}
+        {instructions.length === 1 ? 'instruction' : 'instructions'}
+      </p>
+
+      <ol className="mt-2 space-y-2">
+        {instructions.map((instruction, index) => (
+          <li key={`${instruction.programAddress}-${index}`} className="flex gap-2">
+            <span className="mono mt-0.5 text-[10px] text-haze-500">{index + 1}</span>
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-haze-200">
+                {instruction.programName ?? 'Unknown program'}
+                {instruction.description && (
+                  <span className="font-normal text-haze-400"> &mdash; {instruction.description}</span>
+                )}
+              </p>
+              <p className="mono mt-0.5 break-all text-[10px] text-haze-500">
+                {instruction.programAddress}
+              </p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }

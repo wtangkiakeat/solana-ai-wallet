@@ -26,7 +26,9 @@ import {
   estimateFeeLamports,
   fetchBalanceLamports,
   isUserRejection,
-  recipientIsUnfunded,
+  profileRecipient,
+  simulateTransfer,
+  summarizeInstructions,
   verifyDevnet,
   type NetworkCheck,
 } from '@/lib/solana';
@@ -37,7 +39,13 @@ import {
   type InterpretResponse,
 } from '@/lib/validation';
 import type { ChatMessage, VerifiedFact } from '@/types/chat';
-import type { PendingTransfer, TransactionRecord, TransferOutcome } from '@/types/transaction';
+import type {
+  InstructionSummary,
+  PendingTransfer,
+  SimulationResult,
+  TransactionRecord,
+  TransferOutcome,
+} from '@/types/transaction';
 
 import { ChatInterface } from './ChatInterface';
 import { IconShield } from './icons';
@@ -235,21 +243,46 @@ export function Dashboard() {
         return;
       }
 
-      // Plan the real transaction and ask the network to price it.
+      // Plan the real transaction, then ask the network to price it, run it,
+      // and tell us what it contains.
       let realFee = FALLBACK_FEE_LAMPORTS;
       let feeSource: 'rpc' | 'fallback' = 'fallback';
+      let simulation: SimulationResult = {
+        kind: 'unavailable',
+        reason: 'The transaction could not be planned, so it was not simulated.',
+      };
+      let instructions: InstructionSummary[] = [];
 
       try {
         const instruction = buildTransferInstruction(client, firstPass.recipient, firstPass.lamports);
         const message = await planTransaction.dispatchAsync([instruction]);
+
         const estimate = await estimateFeeLamports(client, message);
         realFee = estimate.lamports;
         feeSource = estimate.source;
         setFeeLamports(estimate.lamports);
+
+        instructions = summarizeInstructions(message, firstPass.lamports);
+        simulation = await simulateTransfer(
+          client,
+          message,
+          walletAddress,
+          firstPass.recipient,
+        );
       } catch (error) {
         // Planning failing is worth telling the user about, but the fallback fee
         // is conservative, so the flow can still continue safely.
-        console.warn('[prepare] could not plan the transaction for a fee estimate', error);
+        console.warn('[prepare] could not plan the transaction', error);
+      }
+
+      // The chain says this transaction would fail. That is a hard stop: there
+      // is no reason to ask the user to sign something already known to break.
+      if (simulation.kind === 'failed') {
+        say(
+          `I simulated this transfer against Solana Devnet before asking you to sign it, and the network reported it would fail:\n\n• ${simulation.reason}\n\nNothing was sent.`,
+          { tone: 'error' },
+        );
+        return;
       }
 
       // Second pass, now with the fee the network actually quoted.
@@ -272,10 +305,15 @@ export function Dashboard() {
 
       const warnings = [...finalCheck.warnings, ...intent.warnings];
 
-      const unfunded = await recipientIsUnfunded(client, finalCheck.recipient);
-      if (unfunded === true) {
+      const recipientProfile = await profileRecipient(client, finalCheck.recipient);
+
+      if (recipientProfile?.hasNoHistory) {
         warnings.push(
-          'This address holds no SOL on Devnet yet. Check it carefully — a transfer to a mistyped address cannot be reversed.',
+          'This address has never been used on Devnet — no balance and no transaction history. Check every character: a transfer to a mistyped address cannot be reversed.',
+        );
+      } else if (recipientProfile?.isUnfunded) {
+        warnings.push(
+          'This address holds no SOL on Devnet. Check it carefully — a transfer to a mistyped address cannot be reversed.',
         );
       }
 
@@ -288,10 +326,13 @@ export function Dashboard() {
         totalLamports: finalCheck.lamports + realFee,
         explanation: intent.explanation,
         warnings,
+        simulation,
+        instructions,
+        recipientProfile,
       });
 
       say(
-        'I have prepared the transfer and checked it against your balance. Review the details and approve it when you are ready.',
+        'I have prepared the transfer, checked it against your balance, and simulated it on Devnet. Review the details and approve it when you are ready.',
         { engine: intent.engine },
       );
     },

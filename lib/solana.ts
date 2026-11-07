@@ -7,12 +7,14 @@
  * applied first.
  */
 
-import { getTransferSolInstruction } from '@solana-program/system';
+import { getTransferSolInstruction, SYSTEM_PROGRAM_ADDRESS } from '@solana-program/system';
 import {
   address,
+  compileTransaction,
   compileTransactionMessage,
   createClient,
   getBase64Decoder,
+  getBase64EncodedWireTransaction,
   getCompiledTransactionMessageEncoder,
   lamports,
   setTransactionMessageLifetimeUsingBlockhash,
@@ -30,6 +32,11 @@ import {
   MAINNET_GENESIS_HASH,
   RPC_URL,
 } from './constants';
+import type {
+  InstructionSummary,
+  RecipientProfile,
+  SimulationResult,
+} from '@/types/transaction';
 
 /**
  * Build the application client.
@@ -180,6 +187,205 @@ export async function estimateFeeLamports(
     return { lamports: BigInt(response.value), source: 'rpc' };
   } catch {
     return { lamports: FALLBACK_FEE_LAMPORTS, source: 'fallback' };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Simulation                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Run the transaction against the network without signing it.
+ *
+ * This is the strongest check in the app, because it is the chain's own answer
+ * rather than ours: it executes the real instructions against real account
+ * state and reports what would change. `sigVerify: false` lets an unsigned
+ * transaction be simulated, which is the whole point — the user has not
+ * approved anything yet.
+ *
+ * The balance deltas it returns are what the preview shows as "what will
+ * actually change", in the manner of Phantom's pre-signature preview.
+ */
+export async function simulateTransfer(
+  client: AppClient,
+  message: TransactionMessage & TransactionMessageWithFeePayer,
+  sender: string,
+  recipient: string,
+): Promise<SimulationResult> {
+  try {
+    // compileTransaction needs a lifetime; the planner has not set one yet.
+    const withLifetime = hasBlockhashLifetime(message)
+      ? message
+      : setTransactionMessageLifetimeUsingBlockhash(
+          (await client.rpc.getLatestBlockhash().send()).value,
+          message,
+        );
+
+    // Simulate a version 0 copy of the message.
+    //
+    // The planner produces version 1 messages, and the Devnet RPC cannot
+    // simulate those: it answers MaxLoadedAccountsDataSizeExceeded for every
+    // one, including transactions that then succeed on chain. Verified by
+    // simulating the same message at both versions — v1 always fails, v0
+    // returns err: null with correct balances.
+    //
+    // For a transfer this is a faithful stand-in: the instructions, fee payer,
+    // accounts and amount are identical, and the versions differ only in
+    // address-table support, which this transaction does not use. The
+    // transaction actually signed and sent is still the planner's v1 message,
+    // so this is a simulation of an equivalent, not of the exact bytes — a
+    // caveat recorded in the README rather than glossed over.
+    const ready = { ...withLifetime, version: 0 } as typeof withLifetime;
+
+    const senderAddress = address(sender);
+    const recipientAddress = address(recipient);
+
+    const wire = getBase64EncodedWireTransaction(compileTransaction(ready));
+
+    const response = await client.rpc
+      .simulateTransaction(wire, {
+        accounts: { addresses: [senderAddress, recipientAddress], encoding: 'base64' },
+        commitment: 'confirmed',
+        encoding: 'base64',
+        // The transaction is deliberately unsigned at this point.
+        replaceRecentBlockhash: true,
+        sigVerify: false,
+      })
+      .send();
+
+    const { accounts, err, logs, unitsConsumed } = response.value;
+
+    if (err) {
+      const recognised = describeSimulationError(err);
+
+      return {
+        // Only block on a failure we understand. An unfamiliar error is
+        // reported honestly as inconclusive rather than dressed up as either
+        // a pass or a verdict.
+        kind: recognised === null ? 'inconclusive' : 'failed',
+        reason: recognised ?? `The network returned an error we do not recognise: ${describeRawError(err)}`,
+        logs: [...(logs ?? [])],
+      };
+    }
+
+    // Post-simulation balances minus current balances gives the real change.
+    const [senderAfter, recipientAfter] = accounts ?? [null, null];
+
+    const senderDelta = senderAfter
+      ? BigInt(senderAfter.lamports) - (await fetchBalanceLamports(client, sender))
+      : null;
+    const recipientDelta = recipientAfter
+      ? BigInt(recipientAfter.lamports) - (await fetchBalanceLamports(client, recipient))
+      : null;
+
+    return {
+      kind: 'succeeded',
+      senderDelta,
+      recipientDelta,
+      computeUnits: unitsConsumed ?? null,
+    };
+  } catch (error) {
+    // A simulation that cannot run is reported as unavailable, never as a pass.
+    return { kind: 'unavailable', reason: describeRpcError(error) };
+  }
+}
+
+function describeRawError(err: unknown): string {
+  return (typeof err === 'string' ? err : JSON.stringify(err)).slice(0, 160);
+}
+
+/**
+ * Translate a simulation error we trust, or return null when we do not
+ * recognise it.
+ *
+ * Returning null matters: an unrecognised error becomes a warning rather than
+ * a block. Simulation quirks exist — the version 1 case above is one — and
+ * refusing a user's valid transfer because of one would be the worse failure.
+ */
+function describeSimulationError(err: unknown): string | null {
+  const text = typeof err === 'string' ? err : JSON.stringify(err);
+
+  if (/InsufficientFundsForRent/i.test(text)) {
+    return 'The recipient would be left below the rent-exempt minimum. Send a larger amount.';
+  }
+  if (/InsufficientFunds/i.test(text)) {
+    return 'The sender does not have enough SOL to cover this transfer and its fee.';
+  }
+  if (/AccountNotFound/i.test(text)) {
+    return 'An account in this transaction does not exist on Devnet.';
+  }
+  if (/AccountInUse|AlreadyProcessed|BlockhashNotFound/i.test(text)) {
+    return 'The network could not process this transaction. Try again in a moment.';
+  }
+
+  return null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Instruction disclosure                                                     */
+/* -------------------------------------------------------------------------- */
+
+const KNOWN_PROGRAMS: Record<string, string> = {
+  '11111111111111111111111111111111': 'System Program',
+  ComputeBudget111111111111111111111111111111: 'Compute Budget Program',
+};
+
+/**
+ * Describe every instruction the transaction contains.
+ *
+ * A transfer should be exactly one System Program instruction. Listing them
+ * lets the user confirm that, rather than taking the app's word that nothing
+ * else was bundled in alongside it.
+ */
+export function summarizeInstructions(
+  message: TransactionMessage & TransactionMessageWithFeePayer,
+  amountLamports: bigint,
+): InstructionSummary[] {
+  return message.instructions.map((instruction) => {
+    const programAddress = String(instruction.programAddress);
+    const programName = KNOWN_PROGRAMS[programAddress] ?? null;
+
+    const description =
+      programAddress === SYSTEM_PROGRAM_ADDRESS
+        ? `Transfer ${amountLamports} lamports`
+        : programName === 'Compute Budget Program'
+          ? 'Set the compute budget for this transaction'
+          : null;
+
+    return { programAddress, programName, description };
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Recipient profile                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What the chain knows about the recipient.
+ *
+ * An address with no balance and no history is either brand new or mistyped,
+ * and a mistyped address is the most expensive mistake available here. Wallets
+ * such as MetaMask surface the same "first time sending here" signal.
+ */
+export async function profileRecipient(
+  client: AppClient,
+  recipient: string,
+): Promise<RecipientProfile | null> {
+  try {
+    const recipientAddress = address(recipient);
+
+    const [balance, signatures] = await Promise.all([
+      client.rpc.getBalance(recipientAddress).send(),
+      client.rpc.getSignaturesForAddress(recipientAddress, { limit: 1 }).send(),
+    ]);
+
+    return {
+      isUnfunded: BigInt(balance.value) === 0n,
+      hasNoHistory: signatures.length === 0,
+    };
+  } catch {
+    // A failed profile must never block a transfer; the warning is just omitted.
+    return null;
   }
 }
 

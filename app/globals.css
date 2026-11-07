@@ -180,6 +180,49 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
+   The transaction modal. A native <dialog>, so these rules mostly undo the
+   browser's default centring box and dress the backdrop.
+   --------------------------------------------------------------------------- */
+
+.modal-dialog {
+  /* Tailwind's preflight zeroes margins on every element, which removes the
+     `margin: auto` a <dialog> relies on to centre itself in the top layer. */
+  margin: auto;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+  color: inherit;
+}
+
+/* The dialog is the backdrop's click target, so it must fill the viewport
+   box the browser gives it rather than hug its content. */
+.modal-dialog::backdrop {
+  background: rgba(2, 4, 14, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.modal-content {
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  border-radius: 1rem;
+  animation: modal-in 0.18s ease-out both;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ---------------------------------------------------------------------------
    Motion. Kept small, and switched off for anyone who asked for less of it.
    --------------------------------------------------------------------------- */
 

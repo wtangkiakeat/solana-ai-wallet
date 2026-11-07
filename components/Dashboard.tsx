@@ -53,6 +53,7 @@ import type {
 
 import { ChatInterface } from './ChatInterface';
 import { IconShield } from './icons';
+import { Modal } from './Modal';
 import { NetworkBadge } from './NetworkBadge';
 import { SendForm } from './SendForm';
 import { Sidebar, type NavView } from './Sidebar';
@@ -751,9 +752,31 @@ ${intent.clarificationQuestion}`
     />
   );
 
-  const transactionPanels = (
-    <>
-      {pending && (
+  /**
+   * The approval step is a modal, not a panel in a column.
+   *
+   * A transfer waiting to be approved is the one thing in this app the user
+   * must not miss, and in a side column it can sit below the fold entirely.
+   * Every wallet puts this in front of you, and so does this one. The result
+   * stays in the same modal so the outcome appears where the user is already
+   * looking rather than somewhere they have to go and find.
+   */
+  const transactionModal = (
+    <Modal
+      open={pending !== null || outcome !== null}
+      // Not dismissible mid-signature: tearing the dialog down while the
+      // wallet is open would leave the user unsure what happened.
+      dismissible={!sendTransaction.isRunning}
+      label={pending ? 'Review and approve this transfer' : 'Transfer result'}
+      onClose={() => {
+        if (pending) {
+          setPending(null);
+          say('Cancelled. Nothing was sent.', { tone: 'warning' });
+        }
+        setOutcome(null);
+      }}
+    >
+      {pending ? (
         <TransactionPreview
           transfer={pending}
           engine={engine ?? undefined}
@@ -764,10 +787,10 @@ ${intent.clarificationQuestion}`
             say('Cancelled. Nothing was sent.', { tone: 'warning' });
           }}
         />
+      ) : (
+        outcome && <TransactionResult outcome={outcome} onDismiss={() => setOutcome(null)} />
       )}
-
-      {outcome && <TransactionResult outcome={outcome} onDismiss={() => setOutcome(null)} />}
-    </>
+    </Modal>
   );
 
   return (
@@ -811,7 +834,6 @@ ${intent.clarificationQuestion}`
               <div className="flex flex-col gap-5">
                 {balanceCard}
                 {sendForm}
-                {transactionPanels}
                 <TransactionHistory records={history} activity={activity} compact />
               </div>
             </div>
@@ -820,7 +842,7 @@ ${intent.clarificationQuestion}`
           {view === 'assistant' && (
             <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,380px)]">
               <div className="min-h-[32rem] xl:h-[calc(100dvh-16rem)]">{chat}</div>
-              <div className="flex flex-col gap-5">{transactionPanels}</div>
+              <div className="flex flex-col gap-5">{sendForm}</div>
             </div>
           )}
 
@@ -833,6 +855,8 @@ ${intent.clarificationQuestion}`
           {view === 'settings' && <SettingsPanel engine={engine} network={network} />}
         </div>
       </main>
+
+      {transactionModal}
     </div>
   );
 }

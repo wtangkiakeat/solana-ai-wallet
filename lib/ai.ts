@@ -26,7 +26,12 @@ import {
   validateSignature,
 } from './validation';
 
-const REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Free and community-hosted models queue requests, and 15 seconds was not
+ * enough for them — every call timed out and fell back to the local parser.
+ * A slow answer from the model beats a fast one from the regex.
+ */
+const REQUEST_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS) || 40_000;
 
 /* -------------------------------------------------------------------------- */
 /* Engine selection                                                           */

@@ -23,6 +23,7 @@ import {
   type InterpretResponse,
   maxSendableLamports,
   validateAddress,
+  validateSignature,
 } from './validation';
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -81,7 +82,10 @@ Choose exactly one action:
 - "transfer_sol": the person wants to send native SOL to an address. Put the amount in amountSol as a plain decimal string ("0.1", not 0.1 and not "100000000 lamports"). Put the address in recipient exactly as written, with no changes. Set status to "ready" only when BOTH the amount and a full recipient address are present in the message. If either is missing, set status to "needs_clarification" and ask for the missing piece in clarificationQuestion.
 - "check_balance": the person is asking what they hold. status "ready".
 - "max_sendable": the person is asking how much they could send, or to send everything. status "ready".
-- "unsupported": anything this wallet cannot do. status "unsupported". This includes token or NFT transfers, swaps, staking, SOL prices or fiat conversion, transaction history, and anything on a network other than Devnet.
+- "explain_transaction": the person pasted a transaction signature, or asked what a transaction did. Put the signature in signature, exactly as written. status "ready". If they ask about "my last transaction" without giving a signature, use "recent_activity" instead.
+- "recent_activity": the person is asking what has happened on their wallet lately — recent transactions, history, "what did I send". status "ready".
+- "inspect_address": the person is asking about a specific address other than a transfer — is it valid, does it exist, what is on it. Put it in subjectAddress. status "ready".
+- "unsupported": anything this wallet cannot do. status "unsupported". This includes token or NFT transfers, swaps, staking, SOL prices or fiat conversion, and anything on a network other than Devnet.
 
 Rules you must follow:
 
@@ -90,7 +94,8 @@ Rules you must follow:
 - You have no price data. Any question about what SOL is worth in dollars or another currency is "unsupported".
 - Keep amountSol exactly as the person expressed it. Do not round it, scale it, or convert it.
 - explanation is one or two plain sentences addressed to the person, describing what will happen. No markdown.
-- Set amountSol and recipient to null for every action other than "transfer_sol".
+- Set amountSol and recipient to null for every action other than "transfer_sol"; signature to null except for "explain_transaction"; subjectAddress to null except for "inspect_address".
+- Never describe what a transaction or an address contains. You do not have that data — the application looks it up and displays it. Your explanation says what is being looked up, not what was found.
 - Return only the JSON object.`;
 
 /** Facts read from the chain by the application, so the model never has to guess. */
@@ -119,12 +124,29 @@ function buildContextBlock(context: InterpretRequest['context']): string {
 const INTENT_JSON_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['status', 'action', 'amountSol', 'recipient', 'explanation', 'clarificationQuestion'],
+  required: [
+    'status',
+    'action',
+    'amountSol',
+    'recipient',
+    'signature',
+    'subjectAddress',
+    'explanation',
+    'clarificationQuestion',
+  ],
   properties: {
     status: { type: 'string', enum: ['ready', 'needs_clarification', 'unsupported'] },
     action: {
       type: 'string',
-      enum: ['transfer_sol', 'check_balance', 'max_sendable', 'unsupported'],
+      enum: [
+        'transfer_sol',
+        'check_balance',
+        'max_sendable',
+        'explain_transaction',
+        'recent_activity',
+        'inspect_address',
+        'unsupported',
+      ],
     },
     amountSol: {
       type: ['string', 'null'],
@@ -133,6 +155,14 @@ const INTENT_JSON_SCHEMA = {
     recipient: {
       type: ['string', 'null'],
       description: 'Solana address exactly as it appeared in the message, or null.',
+    },
+    signature: {
+      type: ['string', 'null'],
+      description: 'Transaction signature to explain, exactly as written, or null.',
+    },
+    subjectAddress: {
+      type: ['string', 'null'],
+      description: 'Address to look up, for inspect_address, or null.',
     },
     explanation: { type: 'string' },
     clarificationQuestion: { type: ['string', 'null'] },
@@ -275,6 +305,8 @@ export function parseLocally(message: string, context: InterpretRequest['context
       action: 'unsupported',
       amountSol: null,
       recipient: null,
+      signature: null,
+      subjectAddress: null,
       explanation:
         'This wallet has no price data, so it cannot tell you what SOL is worth. It can read your Devnet balance and prepare SOL transfers.',
       clarificationQuestion: null,
@@ -287,6 +319,8 @@ export function parseLocally(message: string, context: InterpretRequest['context
       action: 'unsupported',
       amountSol: null,
       recipient: null,
+      signature: null,
+      subjectAddress: null,
       explanation:
         'This MVP only supports native SOL transfers on Devnet. Tokens, NFTs, swaps and staking are not available.',
       clarificationQuestion: null,
@@ -299,6 +333,8 @@ export function parseLocally(message: string, context: InterpretRequest['context
       action: 'max_sendable',
       amountSol: null,
       recipient: null,
+      signature: null,
+      subjectAddress: null,
       explanation: 'Here is the most you could send while still covering the network fee.',
       clarificationQuestion: null,
     };
@@ -310,9 +346,53 @@ export function parseLocally(message: string, context: InterpretRequest['context
       action: 'check_balance',
       amountSol: null,
       recipient: null,
+      signature: null,
+      subjectAddress: null,
       explanation: context?.address
         ? 'Here is your wallet balance, read from Solana Devnet.'
         : 'Connect your wallet first and the balance will be read from Solana Devnet.',
+      clarificationQuestion: null,
+    };
+  }
+
+  // A bare 87-88 character base58 token is a transaction signature.
+  const signatureMatch = text.match(/\b[1-9A-HJ-NP-Za-km-z]{86,90}\b/);
+  if (signatureMatch && !/\bsend\b/.test(lower)) {
+    return {
+      status: 'ready',
+      action: 'explain_transaction',
+      amountSol: null,
+      recipient: null,
+      signature: signatureMatch[0],
+      subjectAddress: null,
+      explanation: 'Here is what that transaction did, read from Solana Devnet.',
+      clarificationQuestion: null,
+    };
+  }
+
+  if (/\b(history|recent|activity|last transaction|past transaction)\b/.test(lower)) {
+    return {
+      status: 'ready',
+      action: 'recent_activity',
+      amountSol: null,
+      recipient: null,
+      signature: null,
+      subjectAddress: null,
+      explanation: 'Here is the recent activity on your wallet, read from Solana Devnet.',
+      clarificationQuestion: null,
+    };
+  }
+
+  const lookupMatch = text.match(BASE58_ADDRESS);
+  if (lookupMatch && /\b(check|look ?up|inspect|valid|exists?|about)\b/.test(lower)) {
+    return {
+      status: 'ready',
+      action: 'inspect_address',
+      amountSol: null,
+      recipient: null,
+      signature: null,
+      subjectAddress: lookupMatch[0],
+      explanation: 'Here is what Solana Devnet knows about that address.',
       clarificationQuestion: null,
     };
   }
@@ -332,6 +412,8 @@ export function parseLocally(message: string, context: InterpretRequest['context
         action: 'transfer_sol',
         amountSol,
         recipient,
+        signature: null,
+        subjectAddress: null,
         explanation: `You are sending ${amountSol} SOL to ${recipient} on Solana Devnet.`,
         clarificationQuestion: null,
       };
@@ -342,6 +424,8 @@ export function parseLocally(message: string, context: InterpretRequest['context
       action: 'transfer_sol',
       amountSol,
       recipient,
+      signature: null,
+      subjectAddress: null,
       explanation: 'Some details are still missing before this transfer can be prepared.',
       clarificationQuestion: !recipient
         ? 'What is the recipient address? Paste the full Solana address.'
@@ -387,6 +471,47 @@ function hardenIntent(
     engine,
   };
 
+  // Read-only actions. They cannot move funds, so they need no approval — but
+  // the arguments they carry are still validated here, because a malformed
+  // signature or address would otherwise reach a chain lookup unchecked.
+  if (intent.action === 'explain_transaction') {
+    const check = validateSignature(intent.signature);
+
+    return {
+      ...base,
+      status: check.ok ? 'ready' : 'needs_clarification',
+      action: 'explain_transaction',
+      amountSol: null,
+      recipient: null,
+      signature: check.ok ? check.address : null,
+      subjectAddress: null,
+      explanation: check.ok ? base.explanation : `I cannot look that up. ${check.reason}`,
+      clarificationQuestion: check.ok
+        ? base.clarificationQuestion
+        : 'Which transaction signature would you like explained?',
+      requiresConfirmation: false,
+    };
+  }
+
+  if (intent.action === 'inspect_address') {
+    const check = validateAddress(intent.subjectAddress);
+
+    return {
+      ...base,
+      status: check.ok ? 'ready' : 'needs_clarification',
+      action: 'inspect_address',
+      amountSol: null,
+      recipient: null,
+      signature: null,
+      subjectAddress: check.ok ? check.address : null,
+      explanation: check.ok ? base.explanation : `I cannot look that up. ${check.reason}`,
+      clarificationQuestion: check.ok
+        ? base.clarificationQuestion
+        : 'Which address would you like me to look up?',
+      requiresConfirmation: false,
+    };
+  }
+
   if (intent.action !== 'transfer_sol') {
     return {
       ...base,
@@ -394,6 +519,8 @@ function hardenIntent(
       action: intent.action,
       amountSol: null,
       recipient: null,
+      signature: null,
+      subjectAddress: null,
       requiresConfirmation: false,
     };
   }
@@ -412,6 +539,8 @@ function hardenIntent(
       action: 'transfer_sol',
       amountSol: amountCheck.ok ? String(intent.amountSol).trim() : null,
       recipient: addressCheck.ok ? addressCheck.address : null,
+      signature: null,
+      subjectAddress: null,
       // The model's own wording is discarded here. It was written on the
       // assumption that the transfer was going ahead, and repeating "you are
       // sending 0.1 SOL to…" above a question about the missing address would
@@ -433,6 +562,8 @@ function hardenIntent(
     action: 'transfer_sol',
     amountSol: String(intent.amountSol).trim(),
     recipient: addressCheck.address,
+    signature: null,
+    subjectAddress: null,
     // Always true for a transfer, whatever the model said.
     requiresConfirmation: true,
   };

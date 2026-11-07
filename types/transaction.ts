@@ -84,3 +84,44 @@ export type TransactionRecord = {
 
 /** Where the UI is in the send flow. Drives which panel is on screen. */
 export type FlowStage = 'idle' | 'interpreting' | 'preparing' | 'awaiting-approval' | 'signing' | 'done';
+
+/* -------------------------------------------------------------------------- */
+/* Read-only chain lookups                                                    */
+/* -------------------------------------------------------------------------- */
+
+/** A decoded transaction, built entirely from chain data. */
+export type TransactionSummary = {
+  signature: string;
+  /** `null` when the transaction succeeded. */
+  error: string | null;
+  slot: bigint;
+  /** Unix seconds, or null when the cluster has dropped the block time. */
+  blockTime: number | null;
+  feeLamports: bigint;
+  /** Populated when the transaction is a recognisable SOL transfer. */
+  transfer: { from: string; to: string; lamports: bigint } | null;
+  /** Program names involved, for anything we cannot decode further. */
+  programs: string[];
+};
+
+/** One entry in the on-chain activity list. */
+export type ActivityEntry = {
+  signature: string;
+  slot: bigint;
+  blockTime: number | null;
+  error: string | null;
+  /** Net lamport change for the wallet being inspected. */
+  delta: bigint | null;
+};
+
+/** What the chain knows about any address. */
+export type AddressReport = {
+  address: string;
+  lamports: bigint;
+  /** The program that owns the account. */
+  owner: string | null;
+  executable: boolean;
+  /** `true` when the account does not exist on chain. */
+  isEmpty: boolean;
+  recentSignatureCount: number;
+};

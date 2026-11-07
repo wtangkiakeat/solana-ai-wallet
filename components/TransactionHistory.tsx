@@ -2,11 +2,14 @@
 
 import { formatSol, shortenAddress } from '@/lib/amounts';
 import { explorerTxUrl } from '@/lib/constants';
-import type { TransactionRecord } from '@/types/transaction';
+import type { ActivityEntry, TransactionRecord } from '@/types/transaction';
 import { IconExternal, IconList } from './icons';
+import { VerifiedTag } from './NetworkBadge';
 
 type TransactionHistoryProps = {
   records: TransactionRecord[];
+  /** Activity read back from the chain, when the user has asked for it. */
+  activity?: ActivityEntry[];
   /** `true` on the dashboard, where only the few most recent rows are shown. */
   compact?: boolean;
 };
@@ -30,8 +33,13 @@ const STATUS_LABELS: Record<TransactionRecord['status'], string> = {
  * for a fresh session, and a wallet that invents transaction history would be
  * worse than one that shows none.
  */
-export function TransactionHistory({ records, compact = false }: TransactionHistoryProps) {
+export function TransactionHistory({
+  records,
+  activity = [],
+  compact = false,
+}: TransactionHistoryProps) {
   const rows = compact ? records.slice(0, 4) : records;
+  const chainRows = compact ? activity.slice(0, 3) : activity;
 
   return (
     <section className="panel" aria-label="Transaction history">
@@ -97,6 +105,55 @@ export function TransactionHistory({ records, compact = false }: TransactionHist
             </li>
           ))}
         </ul>
+      )}
+
+      {chainRows.length > 0 && (
+        <div className="border-t border-ink-700/60">
+          <div className="flex items-center justify-between gap-3 px-5 py-3">
+            <p className="panel-heading">On chain</p>
+            <VerifiedTag label="Read from Devnet" />
+          </div>
+          <ul className="divide-y divide-ink-700/50">
+            {chainRows.map((entry) => (
+              <li key={entry.signature} className="flex items-center gap-3 px-5 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-haze-100">
+                      {entry.delta === null
+                        ? '—'
+                        : `${entry.delta < 0n ? '−' : '+'}${formatSol(entry.delta < 0n ? -entry.delta : entry.delta)} SOL`}
+                    </span>
+                    <span
+                      className={`chip ${
+                        entry.error
+                          ? 'border-rose-accent/40 bg-rose-accent/15 text-rose-accent'
+                          : 'border-mint-500/40 bg-mint-500/15 text-mint-400'
+                      }`}
+                    >
+                      {entry.error ? 'Failed' : 'Confirmed'}
+                    </span>
+                  </div>
+                  <p className="mono mt-1 truncate text-[11px] text-haze-500">
+                    {shortenAddress(entry.signature, 8, 8)}
+                    {entry.blockTime !== null && ` · ${new Date(entry.blockTime * 1000).toLocaleString()}`}
+                  </p>
+                </div>
+
+                <a
+                  href={explorerTxUrl(entry.signature)}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="shrink-0 rounded-lg border border-ink-600 bg-ink-800/70 p-2 text-haze-400
+                    transition-colors hover:text-haze-100"
+                  aria-label="View transaction on Solana Explorer"
+                  title="View on Solana Explorer"
+                >
+                  <IconExternal className="h-3.5 w-3.5" />
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </section>
   );

@@ -18,13 +18,16 @@ import { useSendTransaction, usePlanTransaction } from '@solana/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAppClient } from '@/app/providers';
-import { formatSol } from '@/lib/amounts';
+import { formatSol, shortenAddress } from '@/lib/amounts';
 import { FALLBACK_FEE_LAMPORTS } from '@/lib/constants';
 import {
   buildTransferInstruction,
   describeRpcError,
   estimateFeeLamports,
   fetchBalanceLamports,
+  fetchRecentActivity,
+  fetchTransactionSummary,
+  inspectAddress,
   isUserRejection,
   profileRecipient,
   simulateTransfer,
@@ -40,6 +43,7 @@ import {
 } from '@/lib/validation';
 import type { ChatMessage, VerifiedFact } from '@/types/chat';
 import type {
+  ActivityEntry,
   InstructionSummary,
   PendingTransfer,
   SimulationResult,
@@ -109,6 +113,8 @@ export function Dashboard() {
   const [pending, setPending] = useState<PendingTransfer | null>(null);
   const [outcome, setOutcome] = useState<TransferOutcome | null>(null);
   const [history, setHistory] = useState<TransactionRecord[]>([]);
+  /** Activity read back from the chain, distinct from this session's sends. */
+  const [activity, setActivity] = useState<ActivityEntry[]>([]);
 
   /** Guards against a second submission while one is already in flight. */
   const submittingRef = useRef(false);
@@ -417,6 +423,140 @@ export function Dashboard() {
             break;
           }
 
+          case 'explain_transaction': {
+            if (intent.status !== 'ready' || !intent.signature) {
+              say(
+                intent.clarificationQuestion
+                  ? `${intent.explanation}
+
+${intent.clarificationQuestion}`
+                  : intent.explanation,
+                { tone: 'warning', engine: intent.engine },
+              );
+              break;
+            }
+
+            try {
+              const summary = await fetchTransactionSummary(client, intent.signature);
+
+              if (!summary) {
+                say(
+                  'Devnet has no record of that signature. It may be from another cluster, or too old for this RPC to still hold.',
+                  { tone: 'warning', engine: intent.engine },
+                );
+                break;
+              }
+
+              const facts: VerifiedFact[] = [
+                { label: 'Status', value: summary.error ? `Failed — ${summary.error}` : 'Succeeded' },
+                { label: 'Fee', value: `${formatSol(summary.feeLamports)} SOL` },
+                { label: 'Slot', value: summary.slot.toString() },
+              ];
+
+              if (summary.transfer) {
+                facts.unshift(
+                  { label: 'Amount', value: `${formatSol(summary.transfer.lamports)} SOL` },
+                  { label: 'From', value: shortenAddress(summary.transfer.from, 6, 6) },
+                  { label: 'To', value: shortenAddress(summary.transfer.to, 6, 6) },
+                );
+              }
+              if (summary.blockTime !== null) {
+                facts.push({ label: 'When', value: new Date(summary.blockTime * 1000).toLocaleString() });
+              }
+              if (summary.programs.length > 0) {
+                facts.push({ label: 'Programs', value: summary.programs.join(', ') });
+              }
+
+              say(
+                summary.transfer
+                  ? `That transaction moved ${formatSol(summary.transfer.lamports)} SOL. Here is what the chain records about it.`
+                  : 'Here is what the chain records about that transaction.',
+                { engine: intent.engine, facts },
+              );
+            } catch (error) {
+              say(`I could not read that transaction. ${describeRpcError(error)}`, { tone: 'error' });
+            }
+            break;
+          }
+
+          case 'recent_activity': {
+            if (!walletAddress) {
+              say('Connect your wallet first and I can read its recent activity from the chain.', {
+                tone: 'warning',
+              });
+              break;
+            }
+
+            try {
+              const entries = await fetchRecentActivity(client, walletAddress, 5);
+
+              if (entries.length === 0) {
+                say('This wallet has no transaction history on Devnet yet.', {
+                  engine: intent.engine,
+                });
+                break;
+              }
+
+              setActivity(entries);
+              say(
+                `Here are the last ${entries.length} ${entries.length === 1 ? 'transaction' : 'transactions'} on your wallet, read from the chain. They are listed under Transaction History.`,
+                {
+                  engine: intent.engine,
+                  facts: entries.slice(0, 3).map((entry) => ({
+                    label: entry.error ? 'Failed' : 'Confirmed',
+                    value:
+                      entry.delta === null
+                        ? shortenAddress(entry.signature, 6, 6)
+                        : `${entry.delta < 0n ? '−' : '+'}${formatSol(entry.delta < 0n ? -entry.delta : entry.delta)} SOL`,
+                  })),
+                },
+              );
+            } catch (error) {
+              say(`I could not read your activity. ${describeRpcError(error)}`, { tone: 'error' });
+            }
+            break;
+          }
+
+          case 'inspect_address': {
+            if (intent.status !== 'ready' || !intent.subjectAddress) {
+              say(
+                intent.clarificationQuestion
+                  ? `${intent.explanation}
+
+${intent.clarificationQuestion}`
+                  : intent.explanation,
+                { tone: 'warning', engine: intent.engine },
+              );
+              break;
+            }
+
+            try {
+              const report = await inspectAddress(client, intent.subjectAddress);
+
+              say(
+                report.isEmpty
+                  ? 'That address is a valid Solana address, but no account exists at it on Devnet yet.'
+                  : 'That address is valid and has an account on Devnet. Here is what the chain holds.',
+                {
+                  engine: intent.engine,
+                  facts: [
+                    { label: 'Balance', value: `${formatSol(report.lamports)} SOL` },
+                    { label: 'Exists', value: report.isEmpty ? 'No' : 'Yes' },
+                    { label: 'Owner', value: report.owner ? shortenAddress(report.owner, 6, 6) : '—' },
+                    { label: 'Type', value: report.executable ? 'Program' : 'Wallet / data account' },
+                    {
+                      label: 'Recent transactions',
+                      value: report.recentSignatureCount >= 10 ? '10+' : String(report.recentSignatureCount),
+                    },
+                  ],
+                },
+              );
+            } catch (error) {
+              say(`I could not look that address up. ${describeRpcError(error)}`, { tone: 'error' });
+            }
+            break;
+          }
+
           default:
             say(intent.explanation, { engine: intent.engine });
         }
@@ -611,7 +751,7 @@ export function Dashboard() {
               <div className="flex flex-col gap-5">
                 {balanceCard}
                 {transactionPanels}
-                <TransactionHistory records={history} compact />
+                <TransactionHistory records={history} activity={activity} compact />
               </div>
             </div>
           )}
@@ -625,7 +765,7 @@ export function Dashboard() {
 
           {view === 'history' && (
             <div className="max-w-3xl">
-              <TransactionHistory records={history} />
+              <TransactionHistory records={history} activity={activity} />
             </div>
           )}
 

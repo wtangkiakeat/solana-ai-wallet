@@ -48,6 +48,12 @@ export const INTENT_ACTIONS = [
   'transfer_sol',
   'check_balance',
   'max_sendable',
+  // Read-only actions. These can never move funds, so they need no approval
+  // step — but their output is still rendered from chain data, never from the
+  // model's recollection.
+  'explain_transaction',
+  'recent_activity',
+  'inspect_address',
   'unsupported',
 ] as const;
 
@@ -68,6 +74,10 @@ export const AiIntentSchema = z
     /** Decimal string, never a number — see lib/amounts.ts for why. */
     amountSol: z.string().max(40).nullable().optional(),
     recipient: z.string().max(64).nullable().optional(),
+    /** A transaction signature, for explain_transaction. */
+    signature: z.string().max(128).nullable().optional(),
+    /** An address to look up, for inspect_address. */
+    subjectAddress: z.string().max(64).nullable().optional(),
     explanation: z.string().min(1).max(600),
     clarificationQuestion: z.string().max(300).nullable().optional(),
   })
@@ -87,6 +97,8 @@ export const InterpretResponseSchema = z.object({
   action: z.enum(INTENT_ACTIONS),
   amountSol: z.string().nullable(),
   recipient: z.string().nullable(),
+  signature: z.string().nullable(),
+  subjectAddress: z.string().nullable(),
   explanation: z.string(),
   clarificationQuestion: z.string().nullable(),
   warnings: z.array(z.string()),
@@ -127,6 +139,36 @@ export function validateAddress(candidate: unknown): AddressCheck {
     return {
       ok: false,
       reason: `"${raw}" is not a valid Solana address. Check it for typos — Solana addresses never contain the characters 0, O, I or l.`,
+    };
+  }
+
+  return { ok: true, address: raw };
+}
+
+/**
+ * Validate a transaction signature: base58, and 64 bytes once decoded, which
+ * is 87 or 88 base58 characters.
+ */
+export function validateSignature(candidate: unknown): AddressCheck {
+  if (typeof candidate !== 'string') {
+    return { ok: false, reason: 'No transaction signature was given.' };
+  }
+
+  const raw = candidate.trim();
+
+  if (raw === '') {
+    return { ok: false, reason: 'No transaction signature was given.' };
+  }
+  if (raw.length < 86 || raw.length > 90) {
+    return {
+      ok: false,
+      reason: `"${raw.slice(0, 24)}…" is not a Solana transaction signature. Signatures are 87 or 88 characters long.`,
+    };
+  }
+  if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(raw)) {
+    return {
+      ok: false,
+      reason: 'That is not a valid signature. Solana signatures never contain the characters 0, O, I or l.',
     };
   }
 

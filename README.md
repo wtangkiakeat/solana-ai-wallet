@@ -73,6 +73,17 @@ declined connection and RPC failure.
 **Conversational assistant** — Prepare SOL transfers, report balances, and answer "how much can I
 safely send?". Asks for missing details rather than guessing, and refuses what it cannot do.
 
+**Reading the chain, not just spending from it** — Three further capabilities, all read-only and
+all rendered from chain data rather than the model's recollection:
+
+- *Explain a transaction.* Paste a signature and the app decodes it — amount, sender, recipient,
+  fee, slot, timestamp and programs involved — and the assistant describes it in plain English.
+  This works with no wallet connected.
+- *Recent activity.* "Show me my recent transactions" reads the wallet's real history from
+  `getSignaturesForAddress`, with the net lamport change for each.
+- *Inspect an address.* Balance, whether an account exists, its owning program, whether it is
+  executable, and how many recent transactions it has.
+
 **Structured interpretation** — `POST /api/interpret` returns a strict, Zod-validated shape.
 Amounts are decimal *strings*, never floating-point numbers.
 
@@ -492,8 +503,11 @@ to its signing feature. The count was `0` through interpretation and preview, an
 
 ### Known limitations
 
-- **Transaction history is per-session.** The list shows transfers made in the current browser
-  session and is not read back from the chain. It is not persisted, and reloading clears it.
+- **Two history views, with different lifetimes.** The session list holds transfers made in this
+  browser session and clears on reload; the on-chain list is read live from the chain when asked
+  for, and is limited to the five most recent entries to stay within the public RPC's rate limit.
+  An entry whose detail could not be fetched shows its signature and status with the balance
+  change left blank rather than guessed.
 - **The rate limit on `/api/interpret` is in-memory**, so on a serverless platform each instance
   keeps its own counter. It discourages casual abuse; it is not a robust limiter.
 - **Multi-instruction and multi-signature transactions are untested.** The fee estimator assumes

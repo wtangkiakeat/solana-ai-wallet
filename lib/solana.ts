@@ -18,6 +18,7 @@ import {
   getCompiledTransactionMessageEncoder,
   lamports,
   setTransactionMessageLifetimeUsingBlockhash,
+  signature,
   type TransactionMessage,
   type TransactionMessageWithBlockhashLifetime,
   type TransactionMessageWithFeePayer,
@@ -33,9 +34,12 @@ import {
   RPC_URL,
 } from './constants';
 import type {
+  ActivityEntry,
+  AddressReport,
   InstructionSummary,
   RecipientProfile,
   SimulationResult,
+  TransactionSummary,
 } from '@/types/transaction';
 
 /**
@@ -290,8 +294,23 @@ export async function simulateTransfer(
   }
 }
 
+/**
+ * Render an RPC error value as text.
+ *
+ * Solana's error objects carry BigInt values — `{InstructionError: [0n, {Custom: 2n}]}` —
+ * and `JSON.stringify` throws outright on those. The replacer below is what
+ * keeps a failed transaction from turning into an unrelated crash.
+ */
 function describeRawError(err: unknown): string {
-  return (typeof err === 'string' ? err : JSON.stringify(err)).slice(0, 160);
+  if (typeof err === 'string') return err.slice(0, 160);
+
+  try {
+    return JSON.stringify(err, (_key, value) =>
+      typeof value === 'bigint' ? value.toString() : value,
+    ).slice(0, 160);
+  } catch {
+    return String(err).slice(0, 160);
+  }
 }
 
 /**
@@ -447,4 +466,152 @@ export function describeRpcError(error: unknown): string {
 export function isUserRejection(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
   return /reject|denied|declined|cancel|User rejected/i.test(text);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Read-only chain lookups                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * These three functions are the wallet's "explain" half. None of them can move
+ * funds, so none needs an approval step — but every figure they return still
+ * comes from the chain, never from the model. The assistant may describe what
+ * they found; it may not be the source of it.
+ */
+
+/** Transaction versions the RPC should be willing to return. */
+const MAX_TX_VERSION = 1;
+
+/** Decode one transaction into something a person can read. */
+export async function fetchTransactionSummary(
+  client: AppClient,
+  rawSignature: string,
+): Promise<TransactionSummary | null> {
+  const response = await client.rpc
+    .getTransaction(signature(rawSignature), {
+      encoding: 'jsonParsed',
+      maxSupportedTransactionVersion: MAX_TX_VERSION,
+    } as Parameters<AppClient['rpc']['getTransaction']>[1])
+    .send();
+
+  if (!response) return null;
+
+  const meta = response.meta;
+  const instructions = response.transaction.message.instructions as readonly {
+    program?: string;
+    programId?: unknown;
+    parsed?: { type?: string; info?: Record<string, unknown> };
+  }[];
+
+  // A plain SOL transfer is a System Program `transfer`. Anything else is
+  // reported by program name rather than guessed at.
+  let transfer: TransactionSummary['transfer'] = null;
+  const programs: string[] = [];
+
+  for (const instruction of instructions) {
+    const programName =
+      instruction.program ?? KNOWN_PROGRAMS[String(instruction.programId)] ?? String(instruction.programId);
+    if (programName && !programs.includes(programName)) programs.push(programName);
+
+    if (!transfer && instruction.parsed?.type === 'transfer' && instruction.parsed.info) {
+      const info = instruction.parsed.info;
+      if (info.source && info.destination && info.lamports !== undefined) {
+        transfer = {
+          from: String(info.source),
+          to: String(info.destination),
+          lamports: BigInt(String(info.lamports)),
+        };
+      }
+    }
+  }
+
+  return {
+    signature: rawSignature,
+    error: meta?.err ? describeRawError(meta.err) : null,
+    slot: BigInt(response.slot),
+    blockTime: response.blockTime === null || response.blockTime === undefined ? null : Number(response.blockTime),
+    feeLamports: BigInt(meta?.fee ?? 0),
+    transfer,
+    programs,
+  };
+}
+
+/**
+ * The wallet's recent on-chain activity.
+ *
+ * Per-transaction details are fetched for a small number of entries only: the
+ * public Devnet RPC rate-limits, and a list that loads is worth more than a
+ * complete one that fails. An entry whose detail could not be read still shows
+ * its signature and status, with the balance change left blank rather than
+ * guessed.
+ */
+export async function fetchRecentActivity(
+  client: AppClient,
+  address_: string,
+  limit = 5,
+): Promise<ActivityEntry[]> {
+  const owner = address(address_);
+  const signatures = await client.rpc.getSignaturesForAddress(owner, { limit }).send();
+
+  const entries: ActivityEntry[] = [];
+
+  for (const entry of signatures) {
+    let delta: bigint | null = null;
+
+    try {
+      const detail = await client.rpc
+        .getTransaction(entry.signature, {
+          encoding: 'jsonParsed',
+          maxSupportedTransactionVersion: MAX_TX_VERSION,
+        } as Parameters<AppClient['rpc']['getTransaction']>[1])
+        .send();
+
+      if (detail?.meta) {
+        // Find this wallet among the transaction's accounts and read its
+        // before/after balances.
+        const keys = detail.transaction.message.accountKeys as readonly { pubkey?: unknown }[];
+        const index = keys.findIndex((key) => String(key.pubkey ?? key) === address_);
+
+        if (index >= 0 && detail.meta.preBalances && detail.meta.postBalances) {
+          delta = BigInt(detail.meta.postBalances[index]) - BigInt(detail.meta.preBalances[index]);
+        }
+      }
+    } catch {
+      // Rate-limited or unavailable: leave the balance change blank.
+    }
+
+    entries.push({
+      signature: String(entry.signature),
+      slot: BigInt(entry.slot),
+      blockTime: entry.blockTime === null || entry.blockTime === undefined ? null : Number(entry.blockTime),
+      error: entry.err ? describeRawError(entry.err) : null,
+      delta,
+    });
+  }
+
+  return entries;
+}
+
+/** Everything the chain knows about an address. */
+export async function inspectAddress(
+  client: AppClient,
+  address_: string,
+): Promise<AddressReport> {
+  const subject = address(address_);
+
+  const [account, signatures] = await Promise.all([
+    client.rpc.getAccountInfo(subject, { encoding: 'base64' }).send(),
+    client.rpc.getSignaturesForAddress(subject, { limit: 10 }).send(),
+  ]);
+
+  const value = account.value;
+
+  return {
+    address: address_,
+    lamports: value ? BigInt(value.lamports) : 0n,
+    owner: value ? String(value.owner) : null,
+    executable: value?.executable ?? false,
+    isEmpty: value === null,
+    recentSignatureCount: signatures.length,
+  };
 }
